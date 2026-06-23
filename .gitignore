@@ -1,0 +1,42 @@
+node_modules/
+
+# Build output
+out/
+dist/
+
+# VS Code package
+*.vsix
+
+# VS Code settings and tests
+.vscode/
+.vscode-test/
+
+# TypeScript
+*.tsbuildinfo
+
+# Logs
+npm-debug.log*
+logs/
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Coverage and test output
+coverage/
+.nyc_output/
+
+# Editor directories
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Yarn PnP
+.pnp.*
+.yarn/

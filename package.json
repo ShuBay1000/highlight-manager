@@ -1,0 +1,99 @@
+{
+  "name": "highlight-manager",
+  "displayName": "Highlight Manager",
+  "description": "Highlight registered strings in VS Code.",
+  "version": "1.0.0",
+  "publisher": "ShuBay1000",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ShuBay1000/Highlight-Manager"
+  },
+  "homepage": "https://github.com/ShuBay1000/Highlight-Manager",
+  "bugs": {
+    "url": "https://github.com/ShuBay1000/Highlight-Manager/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "highlight",
+    "keyword",
+    "selection",
+    "sidebar"
+  ],
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "icon": "icon.png",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:highlightManager.toggleSelection",
+    "onView:highlightManager.sidebar"
+  ],
+  "main": "out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "highlightManager",
+          "title": "Highlight Manager",
+          "icon": "activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "highlightManager": [
+        {
+          "id": "highlightManager.sidebar",
+          "name": "Registered Strings",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "highlightManager.toggleSelection",
+        "title": "Highlight: Toggle Highlight"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "highlightManager.toggleSelection",
+          "when": "editorTextFocus",
+          "group": "highlightManager@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "highlightManager.toggleSelection",
+          "when": "editorTextFocus && editorHasSelection",
+          "group": "highlightManager@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "highlightManager.toggleSelection",
+        "key": "ctrl+alt+z",
+        "mac": "cmd+alt+z",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "lint": "tsc -p . --noEmit",
+    "test": "echo \"No tests specified\"",
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "@types/node": "^18.0.0",
+    "vscode": "^1.1.37"
+  }
+}
