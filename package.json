@@ -1,16 +1,16 @@
 {
   "name": "highlight-manager",
-  "displayName": "Highlight Manager",
+  "displayName": "highlight-manager",
   "description": "Highlight registered strings in VS Code.",
   "version": "1.0.0",
   "publisher": "ShuBay1000",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ShuBay1000/Highlight-Manager"
+    "url": "https://github.com/ShuBay1000/highlight-manager.git"
   },
-  "homepage": "https://github.com/ShuBay1000/Highlight-Manager",
+  "homepage": "https://github.com/ShuBay1000/highlight-manager",
   "bugs": {
-    "url": "https://github.com/ShuBay1000/Highlight-Manager/issues"
+    "url": "https://github.com/ShuBay1000/highlight-manager/issues"
   },
   "license": "MIT",
   "keywords": [
