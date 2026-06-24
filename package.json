@@ -25,7 +25,7 @@
   "categories": [
     "Other"
   ],
-  "icon": "icon.png",
+  "icon": "media/icon.png",
   "activationEvents": [
     "onStartupFinished",
     "onCommand:highlightManager.toggleSelection",
@@ -38,7 +38,7 @@
         {
           "id": "highlightManager",
           "title": "Highlight Manager",
-          "icon": "activity-icon.svg"
+          "icon": "media/activity-icon.svg"
         }
       ]
     },
