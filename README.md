@@ -1,3 +1,4 @@
+
 # Highlight Manager
 
 Register selected text as keywords and highlight every match in the editor.
@@ -15,8 +16,7 @@ Register selected text as keywords and highlight every match in the editor.
 1. Select text in the editor.
 2. Run `Highlight: Toggle Highlight` from the Command Palette.
 3. Or use the context menu / shortcut to toggle the selected text.
-
-![usage](media\usage.gif)
+<img width="400" height="303" alt="usage" src="https://github.com/user-attachments/assets/6d5433b1-3674-49fb-a24d-82c1ad0fe640" />
 
 ## Shortcut
 
