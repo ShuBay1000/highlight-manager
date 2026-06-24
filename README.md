@@ -16,7 +16,7 @@ Register selected text as keywords and highlight every match in the editor.
 2. Run `Highlight: Toggle Highlight` from the Command Palette.
 3. Or use the context menu / shortcut to toggle the selected text.
 
-![usage](media\usage.gif)
+![usage]([media\usage.gif](https://github.com/ShuBay1000/highlight-manager/blob/master/media/usage.gif))
 
 ## Shortcut
 
