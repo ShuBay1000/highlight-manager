@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { colorForString } from './colors';
 
 const STORAGE_KEY = 'highlightManager.registeredStrings';
+const WORKSPACE_STORAGE_KEY = 'highlightManager.workspaceStrings';
 
 type State = { registered: string[]; hidden: string[] };
 
@@ -326,7 +327,7 @@ export function activate(context: vscode.ExtensionContext) {
   const vscodeApi = vscode;
   const output = vscodeApi.window.createOutputChannel('Highlight Manager');
   context.subscriptions.push(output);
-  let state = normalizeState(context.globalState.get(STORAGE_KEY, [] as any));
+  let state = normalizeState(context.workspaceState.get(WORKSPACE_STORAGE_KEY, [] as any));
   const decorationTypes = new Map<string, vscode.TextEditorDecorationType>();
   let sidebarView: vscode.WebviewView | undefined;
 
@@ -422,7 +423,7 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   const persist = async () => {
-    await context.globalState.update(STORAGE_KEY, state);
+    await context.workspaceState.update(WORKSPACE_STORAGE_KEY, state);
     // Ensure the sidebar webview receives an explicit update after state persists
     try {
       refreshHighlights();
