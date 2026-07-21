@@ -29,8 +29,7 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:highlightManager.toggleSelection",
-    "onView:highlightManager.sidebar",
-    "onCommand:highlightManager.toggleSelectionGlobal"
+    "onView:highlightManager.sidebar"
   ],
   "main": "out/extension.js",
   "contributes": {
