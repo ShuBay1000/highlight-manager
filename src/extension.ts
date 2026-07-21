@@ -213,12 +213,21 @@ function renderPanel(state: PanelState, nonce: string): string {
     .sectionHeader:first-child {
       margin-top: 0;
     }
-    .sectionTitle {
+    .sectionToggle {
+      appearance: none;
+      border: none;
+      background: none;
+      padding: 0;
+      cursor: pointer;
+      font-family: inherit;
       font-size: 11px;
       font-weight: 600;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--muted);
+    }
+    .sectionToggle:hover {
+      color: var(--text);
     }
     .sectionHeader button {
       padding: 2px 6px;
@@ -244,6 +253,9 @@ function renderPanel(state: PanelState, nonce: string): string {
     const vscode = acquireVsCodeApi();
     const list = document.getElementById('strings');
     const initialState = JSON.parse(document.getElementById('initial-state').textContent);
+    // Collapse state survives list updates and webview reloads via setState.
+    const collapsed = (vscode.getState() || {}).collapsed || {};
+    let lastState = initialState;
 
     function hashString(value) {
       let hash = 2166136261;
@@ -271,12 +283,17 @@ function renderPanel(state: PanelState, nonce: string): string {
     }
 
     function renderSection(title, scope, data, options) {
+      const isCollapsed = !!collapsed[scope];
       const header = document.createElement('div');
       header.className = 'sectionHeader';
 
-      const heading = document.createElement('span');
-      heading.className = 'sectionTitle';
-      heading.textContent = title + ' (' + data.registered.length + ')';
+      const heading = document.createElement('button');
+      heading.type = 'button';
+      heading.className = 'sectionToggle';
+      heading.dataset.toggleSection = scope;
+      heading.textContent = (isCollapsed ? '\\u25b8 ' : '\\u25be ') + title + ' (' + data.registered.length + ')';
+      heading.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      heading.title = isCollapsed ? 'Expand section' : 'Collapse section';
 
       const clearButton = document.createElement('button');
       clearButton.type = 'button';
@@ -288,6 +305,10 @@ function renderPanel(state: PanelState, nonce: string): string {
 
       header.append(heading, clearButton);
       list.appendChild(header);
+
+      if (isCollapsed) {
+        return;
+      }
 
       if (!data.registered.length) {
         const empty = document.createElement('div');
@@ -351,6 +372,7 @@ function renderPanel(state: PanelState, nonce: string): string {
     }
 
     function renderStrings(state) {
+      lastState = state;
       list.textContent = '';
 
       const globalData = normalizeSection(state.global);
@@ -380,6 +402,15 @@ function renderPanel(state: PanelState, nonce: string): string {
     });
 
     list.addEventListener('click', (event) => {
+      const toggle = event.target.closest('button[data-toggle-section]');
+      if (toggle) {
+        const scope = toggle.dataset.toggleSection;
+        collapsed[scope] = !collapsed[scope];
+        vscode.setState({ collapsed });
+        renderStrings(lastState);
+        return;
+      }
+
       const button = event.target.closest('button[data-action]');
       if (!button) {
         return;
