@@ -28,6 +28,29 @@ function normalizeStrings(values: unknown): string[] {
   return [...new Set((Array.isArray(values) ? values : []).filter((value) => typeof value === 'string' && value.length > 0))];
 }
 
+function pruneFlags(state: State): State {
+  const registered = new Set(state.registered);
+  return { registered: state.registered, hidden: state.hidden.filter((item) => registered.has(item)) };
+}
+
+function toggleTerms(state: State, terms: string[]): State {
+  const current = new Set(state.registered);
+  const toRemove = new Set(terms.filter((term) => current.has(term)));
+  const toAdd = terms.filter((term) => !current.has(term));
+  return pruneFlags({
+    registered: [...state.registered.filter((term) => !toRemove.has(term)), ...toAdd],
+    hidden: state.hidden
+  });
+}
+
+function removeTerm(state: State, value: string): State {
+  return pruneFlags({ registered: state.registered.filter((item) => item !== value), hidden: state.hidden });
+}
+
+function toggleIn(values: string[], value: string): string[] {
+  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+}
+
 function getNonce(): string {
   return Math.random().toString(36).slice(2, 14);
 }
@@ -303,9 +326,7 @@ export function activate(context: vscode.ExtensionContext) {
   const vscodeApi = vscode;
   const output = vscodeApi.window.createOutputChannel('Highlight Manager');
   context.subscriptions.push(output);
-  const loadedState = normalizeState(context.globalState.get(STORAGE_KEY, [] as any));
-  let registered = loadedState.registered;
-  let hidden = loadedState.hidden;
+  let state = normalizeState(context.globalState.get(STORAGE_KEY, [] as any));
   const decorationTypes = new Map<string, vscode.TextEditorDecorationType>();
   let sidebarView: vscode.WebviewView | undefined;
 
@@ -316,13 +337,13 @@ export function activate(context: vscode.ExtensionContext) {
     // default, since retainContextWhenHidden is off), and does NOT call
     // resolveWebviewView again. Without this, deleted keywords reappear after
     // collapsing/expanding the sidebar.
-    webviewView.webview.html = renderPanel({ registered, hidden }, getNonce());
+    webviewView.webview.html = renderPanel(state, getNonce());
   };
 
   const viewProvider: vscode.WebviewViewProvider = {
     resolveWebviewView(webviewView: vscode.WebviewView) {
       sidebarView = webviewView;
-      output.appendLine('Webview resolved; sending initial state with ' + registered.length + ' registered items');
+      output.appendLine('Webview resolved; sending initial state with ' + state.registered.length + ' registered items');
       webviewView.webview.options = { enableScripts: true };
       renderSidebarHtml(webviewView);
       webviewView.onDidChangeVisibility(() => {
@@ -361,7 +382,7 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   const refreshHighlights = () => {
-    const active = registered.filter((value) => !hidden.includes(value));
+    const active = state.registered.filter((value) => !state.hidden.includes(value));
 
     for (const editor of vscodeApi.window.visibleTextEditors) {
       for (const decorationType of decorationTypes.values()) {
@@ -379,8 +400,8 @@ export function activate(context: vscode.ExtensionContext) {
     if (sidebarView) {
       sidebarView.webview.postMessage({
         type: 'update',
-        registered,
-        hidden
+        registered: state.registered,
+        hidden: state.hidden
       });
     }
   };
@@ -401,14 +422,14 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   const persist = async () => {
-    await context.globalState.update(STORAGE_KEY, { registered, hidden });
+    await context.globalState.update(STORAGE_KEY, state);
     // Ensure the sidebar webview receives an explicit update after state persists
     try {
       refreshHighlights();
-      output.appendLine('Persisted state. registered=' + JSON.stringify(registered));
+      output.appendLine('Persisted state. registered=' + JSON.stringify(state.registered));
       if (sidebarView && sidebarView.webview) {
         // postMessage returns Thenable<boolean> in webview API
-        Promise.resolve(sidebarView.webview.postMessage({ type: 'update', registered, hidden })).catch(() => {});
+        Promise.resolve(sidebarView.webview.postMessage({ type: 'update', registered: state.registered, hidden: state.hidden })).catch(() => {});
         output.appendLine('Posted update to sidebar webview');
       } else {
         output.appendLine('No sidebar view active to post update');
@@ -431,21 +452,9 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    const selectedSet = new Set(selected);
-    const toAdd = selected.filter((value) => !registered.includes(value));
-    const next = normalizeStrings([
-      ...registered.filter((value) => !selectedSet.has(value)),
-      ...toAdd
-    ]);
-
-    syncDecorationTypes(next);
-    registered = next;
-    output.appendLine('toggleSelection: selected=' + JSON.stringify(selected) + ' toAdd=' + JSON.stringify(toAdd) + ' registered=' + JSON.stringify(registered));
-    for (const term of toAdd) {
-      if (!decorationTypes.has(term)) {
-        decorationTypes.set(term, createDecorationType(vscodeApi, term));
-      }
-    }
+    state = toggleTerms(state, selected);
+    syncDecorationTypes(state.registered);
+    output.appendLine('toggleSelection: selected=' + JSON.stringify(selected) + ' registered=' + JSON.stringify(state.registered));
     await persist();
   };
 
@@ -456,28 +465,27 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    if (!registered.includes(value)) {
+    if (!state.registered.includes(value)) {
       return;
     }
 
-    registered = registered.filter((item) => item !== value);
-    hidden = hidden.filter((item) => item !== value);
+    state = removeTerm(state, value);
     decorationTypes.get(value)?.dispose();
     decorationTypes.delete(value);
     await persist();
   };
 
   const toggleHidden = async (value: unknown) => {
-    if (typeof value !== 'string' || !value || !registered.includes(value)) {
+    if (typeof value !== 'string' || !value || !state.registered.includes(value)) {
       return;
     }
 
-    hidden = hidden.includes(value) ? hidden.filter((item) => item !== value) : [...hidden, value];
+    state = { ...state, hidden: toggleIn(state.hidden, value) };
     await persist();
   };
 
   const clearAll = async () => {
-    if (!registered.length) {
+    if (!state.registered.length) {
       return;
     }
 
@@ -495,8 +503,7 @@ export function activate(context: vscode.ExtensionContext) {
       decorationType.dispose();
     }
     decorationTypes.clear();
-    registered = [];
-    hidden = [];
+    state = { registered: [], hidden: [] };
     await persist();
   };
 
