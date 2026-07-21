@@ -1,10 +1,13 @@
 import * as vscode from 'vscode';
 import { colorForString } from './colors';
 
-const STORAGE_KEY = 'highlightManager.registeredStrings';
+// Pre-existing storage key: data saved by older versions automatically
+// becomes the global scope, so nothing is lost on upgrade.
+const GLOBAL_STORAGE_KEY = 'highlightManager.registeredStrings';
 const WORKSPACE_STORAGE_KEY = 'highlightManager.workspaceStrings';
 
 type State = { registered: string[]; hidden: string[] };
+type Scope = 'global' | 'project';
 
 function normalizeState(value: unknown): State {
   if (Array.isArray(value)) {
@@ -60,9 +63,13 @@ function escapeScriptJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
-function createDecorationType(vscodeApi: typeof vscode, value: string): vscode.TextEditorDecorationType {
+function createDecorationType(vscodeApi: typeof vscode, value: string, dashed: boolean): vscode.TextEditorDecorationType {
+  const colors = colorForString(value);
   return vscodeApi.window.createTextEditorDecorationType({
-    ...colorForString(value),
+    backgroundColor: colors.backgroundColor,
+    // Global keywords use a dashed border so they can be told apart from
+    // project-scoped ones at a glance.
+    border: dashed ? colors.border.replace('solid', 'dashed') : colors.border,
     borderRadius: '2px'
   } as vscode.DecorationRenderOptions);
 }
@@ -327,8 +334,10 @@ export function activate(context: vscode.ExtensionContext) {
   const vscodeApi = vscode;
   const output = vscodeApi.window.createOutputChannel('Highlight Manager');
   context.subscriptions.push(output);
-  let state = normalizeState(context.workspaceState.get(WORKSPACE_STORAGE_KEY, [] as any));
-  const decorationTypes = new Map<string, vscode.TextEditorDecorationType>();
+  let globalKw = normalizeState(context.globalState.get(GLOBAL_STORAGE_KEY, [] as any));
+  let projectKw = normalizeState(context.workspaceState.get(WORKSPACE_STORAGE_KEY, [] as any));
+  const hasWorkspace = () => (vscodeApi.workspace.workspaceFolders || []).length > 0;
+  const decorationTypes = new Map<string, { dashed: boolean; type: vscode.TextEditorDecorationType }>();
   let sidebarView: vscode.WebviewView | undefined;
 
   const renderSidebarHtml = (webviewView: vscode.WebviewView) => {
@@ -338,13 +347,13 @@ export function activate(context: vscode.ExtensionContext) {
     // default, since retainContextWhenHidden is off), and does NOT call
     // resolveWebviewView again. Without this, deleted keywords reappear after
     // collapsing/expanding the sidebar.
-    webviewView.webview.html = renderPanel(state, getNonce());
+    webviewView.webview.html = renderPanel(projectKw, getNonce());
   };
 
   const viewProvider: vscode.WebviewViewProvider = {
     resolveWebviewView(webviewView: vscode.WebviewView) {
       sidebarView = webviewView;
-      output.appendLine('Webview resolved; sending initial state with ' + state.registered.length + ' registered items');
+      output.appendLine('Webview resolved; sending initial state with ' + projectKw.registered.length + ' registered items');
       webviewView.webview.options = { enableScripts: true };
       renderSidebarHtml(webviewView);
       webviewView.onDidChangeVisibility(() => {
@@ -382,111 +391,138 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  // Effective rendering state per keyword. Global takes precedence: when a
+  // keyword is registered in both scopes, the global entry's settings govern.
+  const effectiveEntries = (): Map<string, { hidden: boolean; dashed: boolean }> => {
+    const entries = new Map<string, { hidden: boolean; dashed: boolean }>();
+    if (hasWorkspace()) {
+      for (const term of projectKw.registered) {
+        entries.set(term, { hidden: projectKw.hidden.includes(term), dashed: false });
+      }
+    }
+    for (const term of globalKw.registered) {
+      entries.set(term, { hidden: globalKw.hidden.includes(term), dashed: true });
+    }
+    return entries;
+  };
+
   const refreshHighlights = () => {
-    const active = state.registered.filter((value) => !state.hidden.includes(value));
+    const entries = effectiveEntries();
+
+    // Reconcile decoration types: drop terms that are gone or whose governing
+    // scope (border style) changed. dispose() also clears them from editors.
+    for (const [term, deco] of decorationTypes) {
+      const entry = entries.get(term);
+      if (!entry || entry.dashed !== deco.dashed) {
+        deco.type.dispose();
+        decorationTypes.delete(term);
+      }
+    }
 
     for (const editor of vscodeApi.window.visibleTextEditors) {
-      for (const decorationType of decorationTypes.values()) {
-        editor.setDecorations(decorationType, []);
+      for (const deco of decorationTypes.values()) {
+        editor.setDecorations(deco.type, []);
       }
 
-      for (const term of active) {
-        const decorationType = decorationTypes.get(term) || createDecorationType(vscodeApi, term);
-        decorationTypes.set(term, decorationType);
-        const ranges = findMatches(editor.document.getText(), term).map(([start, end]) => new vscodeApi.Range(editor.document.positionAt(start), editor.document.positionAt(end)));
-        editor.setDecorations(decorationType, ranges);
+      const text = editor.document.getText();
+      for (const [term, entry] of entries) {
+        if (entry.hidden) {
+          continue;
+        }
+
+        let deco = decorationTypes.get(term);
+        if (!deco) {
+          deco = { dashed: entry.dashed, type: createDecorationType(vscodeApi, term, entry.dashed) };
+          decorationTypes.set(term, deco);
+        }
+        const ranges = findMatches(text, term).map(([start, end]) => new vscodeApi.Range(editor.document.positionAt(start), editor.document.positionAt(end)));
+        editor.setDecorations(deco.type, ranges);
       }
     }
 
     if (sidebarView) {
       sidebarView.webview.postMessage({
         type: 'update',
-        registered: state.registered,
-        hidden: state.hidden
+        registered: projectKw.registered,
+        hidden: projectKw.hidden
       });
     }
   };
 
-  const syncDecorationTypes = (nextRegistered: string[]) => {
-    const next = new Set(nextRegistered);
-    for (const [term, decorationType] of decorationTypes) {
-      if (next.has(term)) {
-        continue;
-      }
-
-      for (const editor of vscodeApi.window.visibleTextEditors) {
-        editor.setDecorations(decorationType, []);
-      }
-      decorationType.dispose();
-      decorationTypes.delete(term);
-    }
+  const applyProject = async (mutate: (state: State) => State) => {
+    projectKw = mutate(projectKw);
+    await context.workspaceState.update(WORKSPACE_STORAGE_KEY, projectKw);
+    output.appendLine('Persisted project state. registered=' + JSON.stringify(projectKw.registered));
+    refreshHighlights();
   };
 
-  const persist = async () => {
-    await context.workspaceState.update(WORKSPACE_STORAGE_KEY, state);
-    // Ensure the sidebar webview receives an explicit update after state persists
-    try {
-      refreshHighlights();
-      output.appendLine('Persisted state. registered=' + JSON.stringify(state.registered));
-      if (sidebarView && sidebarView.webview) {
-        // postMessage returns Thenable<boolean> in webview API
-        Promise.resolve(sidebarView.webview.postMessage({ type: 'update', registered: state.registered, hidden: state.hidden })).catch(() => {});
-        output.appendLine('Posted update to sidebar webview');
-      } else {
-        output.appendLine('No sidebar view active to post update');
-      }
-    } catch (err) {
-      // swallow errors but keep functionality
-    }
+  const applyGlobal = async (mutate: (state: State) => State) => {
+    globalKw = mutate(globalKw);
+    await context.globalState.update(GLOBAL_STORAGE_KEY, globalKw);
+    output.appendLine('Persisted global state. registered=' + JSON.stringify(globalKw.registered));
+    refreshHighlights();
   };
+
+  const stateOf = (scope: Scope) => (scope === 'global' ? globalKw : projectKw);
 
   const selectedStrings = (editor: vscode.TextEditor) => normalizeStrings(editor.selections.map((selection) => editor.document.getText(selection)));
 
-  const toggleSelection = async () => {
+  const currentSelection = (): string[] | undefined => {
     const editor = vscodeApi.window.activeTextEditor;
     if (!editor) {
-      return;
+      return undefined;
     }
 
     const selected = selectedStrings(editor);
-    if (!selected.length) {
+    return selected.length ? selected : undefined;
+  };
+
+  const toggleSelection = async () => {
+    const selected = currentSelection();
+    if (!selected) {
       return;
     }
 
-    state = toggleTerms(state, selected);
-    syncDecorationTypes(state.registered);
-    output.appendLine('toggleSelection: selected=' + JSON.stringify(selected) + ' registered=' + JSON.stringify(state.registered));
-    await persist();
+    if (!hasWorkspace()) {
+      vscodeApi.window.showInformationMessage('Highlight Manager: open a folder to use project keywords, or use "Highlight: Toggle Global Highlight" instead.');
+      return;
+    }
+
+    output.appendLine('toggleSelection: selected=' + JSON.stringify(selected));
+    await applyProject((state) => toggleTerms(state, selected));
+  };
+
+  const toggleSelectionGlobal = async () => {
+    const selected = currentSelection();
+    if (!selected) {
+      return;
+    }
+
+    output.appendLine('toggleSelectionGlobal: selected=' + JSON.stringify(selected));
+    await applyGlobal((state) => toggleTerms(state, selected));
   };
 
   const contextToggleSelection = vscodeApi.commands.registerCommand('highlightManager.toggleSelection', toggleSelection);
+  const contextToggleSelectionGlobal = vscodeApi.commands.registerCommand('highlightManager.toggleSelectionGlobal', toggleSelectionGlobal);
 
   const deleteKeyword = async (value: unknown) => {
-    if (typeof value !== 'string' || !value) {
+    if (typeof value !== 'string' || !value || !stateOf('project').registered.includes(value)) {
       return;
     }
 
-    if (!state.registered.includes(value)) {
-      return;
-    }
-
-    state = removeTerm(state, value);
-    decorationTypes.get(value)?.dispose();
-    decorationTypes.delete(value);
-    await persist();
+    await applyProject((state) => removeTerm(state, value));
   };
 
   const toggleHidden = async (value: unknown) => {
-    if (typeof value !== 'string' || !value || !state.registered.includes(value)) {
+    if (typeof value !== 'string' || !value || !stateOf('project').registered.includes(value)) {
       return;
     }
 
-    state = { ...state, hidden: toggleIn(state.hidden, value) };
-    await persist();
+    await applyProject((state) => ({ ...state, hidden: toggleIn(state.hidden, value) }));
   };
 
   const clearAll = async () => {
-    if (!state.registered.length) {
+    if (!stateOf('project').registered.length) {
       return;
     }
 
@@ -495,22 +531,13 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    for (const editor of vscodeApi.window.visibleTextEditors) {
-      for (const decorationType of decorationTypes.values()) {
-        editor.setDecorations(decorationType, []);
-      }
-    }
-    for (const decorationType of decorationTypes.values()) {
-      decorationType.dispose();
-    }
-    decorationTypes.clear();
-    state = { registered: [], hidden: [] };
-    await persist();
+    await applyProject(() => ({ registered: [], hidden: [] }));
   };
 
   context.subscriptions.push(
     vscodeApi.window.registerWebviewViewProvider('highlightManager.sidebar', viewProvider),
     contextToggleSelection,
+    contextToggleSelectionGlobal,
     vscodeApi.window.onDidChangeActiveTextEditor(refreshHighlights),
     vscodeApi.workspace.onDidChangeTextDocument((event) => {
       if (vscodeApi.window.visibleTextEditors.some((editor) => editor.document === event.document)) {
