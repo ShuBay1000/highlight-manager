@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
 
 declare module 'vscode' {
+  // setKeysForSync exists since VS Code 1.49 but is missing from the bundled
+  // typings; declared optional so callers can feature-detect it.
+  export interface Memento {
+    setKeysForSync?(keys: readonly string[]): void;
+  }
+
   export interface Webview {
     options: any;
     html: string;

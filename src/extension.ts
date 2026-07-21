@@ -404,6 +404,8 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(output);
   let globalKw = normalizeState(context.globalState.get(GLOBAL_STORAGE_KEY, [] as any));
   let projectKw = normalizeState(context.workspaceState.get(WORKSPACE_STORAGE_KEY, [] as any));
+  // Sync global keywords across machines via Settings Sync (no-op on old VS Code).
+  context.globalState.setKeysForSync?.([GLOBAL_STORAGE_KEY]);
   const hasWorkspace = () => (vscodeApi.workspace.workspaceFolders || []).length > 0;
   const panelState = (): PanelState => ({ global: globalKw, project: projectKw, hasWorkspace: hasWorkspace() });
   const asScope = (value: unknown): Scope | undefined => (value === 'global' || value === 'project' ? value : undefined);
@@ -520,15 +522,19 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  // Read-merge-write: re-read the stored value and apply the operation to the
+  // fresh copy, so a concurrent write from another window (both scopes can be
+  // shared: global always, workspace when the same folder is open twice) is
+  // not clobbered by our stale in-memory snapshot.
   const applyProject = async (mutate: (state: State) => State) => {
-    projectKw = mutate(projectKw);
+    projectKw = mutate(normalizeState(context.workspaceState.get(WORKSPACE_STORAGE_KEY, [] as any)));
     await context.workspaceState.update(WORKSPACE_STORAGE_KEY, projectKw);
     output.appendLine('Persisted project state. registered=' + JSON.stringify(projectKw.registered));
     refreshHighlights();
   };
 
   const applyGlobal = async (mutate: (state: State) => State) => {
-    globalKw = mutate(globalKw);
+    globalKw = mutate(normalizeState(context.globalState.get(GLOBAL_STORAGE_KEY, [] as any)));
     await context.globalState.update(GLOBAL_STORAGE_KEY, globalKw);
     output.appendLine('Persisted global state. registered=' + JSON.stringify(globalKw.registered));
     refreshHighlights();
@@ -619,6 +625,24 @@ export function activate(context: vscode.ExtensionContext) {
       if (vscodeApi.window.visibleTextEditors.some((editor) => editor.document === event.document)) {
         refreshHighlights();
       }
+    }),
+    // Another window may have changed the shared global state while this one
+    // was in the background; re-read on focus so the views converge.
+    vscodeApi.window.onDidChangeWindowState((event) => {
+      if (!event.focused) {
+        return;
+      }
+
+      const freshGlobal = normalizeState(context.globalState.get(GLOBAL_STORAGE_KEY, [] as any));
+      const freshProject = normalizeState(context.workspaceState.get(WORKSPACE_STORAGE_KEY, [] as any));
+      if (JSON.stringify(freshGlobal) === JSON.stringify(globalKw) && JSON.stringify(freshProject) === JSON.stringify(projectKw)) {
+        return;
+      }
+
+      globalKw = freshGlobal;
+      projectKw = freshProject;
+      output.appendLine('Reloaded keyword state on window focus');
+      refreshHighlights();
     })
   );
 
