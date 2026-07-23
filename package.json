@@ -55,6 +55,10 @@
       {
         "command": "highlightManager.toggleSelection",
         "title": "Highlight: Toggle Highlight"
+      },
+      {
+        "command": "highlightManager.toggleSelectionGlobal",
+        "title": "Highlight: Toggle Global Highlight"
       }
     ],
     "menus": {
@@ -63,6 +67,11 @@
           "command": "highlightManager.toggleSelection",
           "when": "editorTextFocus",
           "group": "highlightManager@1"
+        },
+        {
+          "command": "highlightManager.toggleSelectionGlobal",
+          "when": "editorTextFocus",
+          "group": "highlightManager@2"
         }
       ],
       "editor/context": [
@@ -70,6 +79,11 @@
           "command": "highlightManager.toggleSelection",
           "when": "editorTextFocus && editorHasSelection",
           "group": "highlightManager@1"
+        },
+        {
+          "command": "highlightManager.toggleSelectionGlobal",
+          "when": "editorTextFocus && editorHasSelection",
+          "group": "highlightManager@2"
         }
       ]
     },
@@ -78,6 +92,12 @@
         "command": "highlightManager.toggleSelection",
         "key": "ctrl+alt+z",
         "mac": "cmd+alt+z",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "highlightManager.toggleSelectionGlobal",
+        "key": "ctrl+alt+shift+z",
+        "mac": "cmd+alt+shift+z",
         "when": "editorTextFocus"
       }
     ]

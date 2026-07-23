@@ -9,11 +9,11 @@ export function hashString(value: string): number {
   return hash >>> 0;
 }
 
-export function colorForString(value: string): { backgroundColor: string; border: string } {
+export function colorForString(value: string): { backgroundColor: string; borderColor: string } {
   const hue = hashString(value) % 360;
 
   return {
     backgroundColor: `hsla(${hue}, 90%, 60%, 0.28)`,
-    border: `1px solid hsla(${hue}, 90%, 42%, 0.75)`
+    borderColor: `hsla(${hue}, 90%, 42%, 0.75)`
   };
 }

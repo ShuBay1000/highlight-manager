@@ -1,9 +1,14 @@
 import * as vscode from 'vscode';
 import { colorForString } from './colors';
 
-const STORAGE_KEY = 'highlightManager.registeredStrings';
+// Pre-existing storage key: data saved by older versions automatically
+// becomes the global scope, so nothing is lost on upgrade.
+const GLOBAL_STORAGE_KEY = 'highlightManager.registeredStrings';
+const WORKSPACE_STORAGE_KEY = 'highlightManager.workspaceStrings';
 
 type State = { registered: string[]; hidden: string[] };
+type Scope = 'global' | 'project';
+type PanelState = { global: State; project: State; hasWorkspace: boolean };
 
 function normalizeState(value: unknown): State {
   if (Array.isArray(value)) {
@@ -13,8 +18,8 @@ function normalizeState(value: unknown): State {
   if (value && typeof value === 'object') {
     // @ts-ignore indexed access on unknown
     const registered = normalizeStrings((value as any).registered || (value as any).registeredStrings || []);
-    const hidden = normalizeStrings((value as any).hidden || (value as any).hiddenStrings || []).filter((item) => registered.includes(item));
-    return { registered, hidden };
+    const hidden = normalizeStrings((value as any).hidden || (value as any).hiddenStrings || []);
+    return pruneFlags({ registered, hidden });
   }
 
   return { registered: [], hidden: [] };
@@ -28,6 +33,24 @@ function normalizeStrings(values: unknown): string[] {
   return [...new Set((Array.isArray(values) ? values : []).filter((value) => typeof value === 'string' && value.length > 0))];
 }
 
+function pruneFlags(state: State): State {
+  const registered = new Set(state.registered);
+  return { registered: state.registered, hidden: state.hidden.filter((item) => registered.has(item)) };
+}
+
+function toggleTerms(state: State, terms: string[]): State {
+  const current = new Set(state.registered);
+  const termSet = new Set(terms);
+  return pruneFlags({
+    registered: [...state.registered.filter((term) => !termSet.has(term)), ...terms.filter((term) => !current.has(term))],
+    hidden: state.hidden
+  });
+}
+
+function toggleIn(values: string[], value: string): string[] {
+  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+}
+
 function getNonce(): string {
   return Math.random().toString(36).slice(2, 14);
 }
@@ -36,9 +59,15 @@ function escapeScriptJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
-function createDecorationType(vscodeApi: typeof vscode, value: string): vscode.TextEditorDecorationType {
+// Global keywords use a dashed border so they can be told apart from
+// project-scoped ones at a glance.
+const borderStyleFor = (scope: Scope) => (scope === 'global' ? 'dashed' : 'solid');
+
+function createDecorationType(vscodeApi: typeof vscode, value: string, scope: Scope): vscode.TextEditorDecorationType {
+  const colors = colorForString(value);
   return vscodeApi.window.createTextEditorDecorationType({
-    ...colorForString(value),
+    backgroundColor: colors.backgroundColor,
+    border: `1px ${borderStyleFor(scope)} ${colors.borderColor}`,
     borderRadius: '2px'
   } as vscode.DecorationRenderOptions);
 }
@@ -61,7 +90,7 @@ function findMatches(text: string, term: string): Array<[number, number]> {
   return matches;
 }
 
-function renderPanel(state: State, nonce: string): string {
+function renderPanel(state: PanelState, nonce: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -100,10 +129,6 @@ function renderPanel(state: State, nonce: string): string {
       padding: 10px 12px;
       background: var(--panel);
       border-bottom: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
     }
     h1 {
       margin: 0;
@@ -158,7 +183,8 @@ function renderPanel(state: State, nonce: string): string {
       gap: 4px;
       flex: 0 0 auto;
     }
-    .item button {
+    .item button,
+    .sectionHeader button {
       padding: 2px 6px;
       font-size: 11px;
     }
@@ -168,8 +194,37 @@ function renderPanel(state: State, nonce: string): string {
     .item.hidden .label {
       text-decoration: line-through;
     }
+    .item.overridden {
+      opacity: 0.45;
+    }
+    .sectionHeader {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .sectionHeader:first-child {
+      margin-top: 0;
+    }
+    .sectionToggle {
+      appearance: none;
+      border: none;
+      background: none;
+      padding: 0;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .sectionToggle:hover {
+      color: var(--text);
+    }
     .empty {
-      padding: 8px 0;
+      padding: 4px 0 8px;
       color: var(--muted);
     }
   </style>
@@ -178,7 +233,6 @@ function renderPanel(state: State, nonce: string): string {
   <div class="shell">
     <header class="hero">
       <h1>Keyword List</h1>
-      <button id="clearAll" type="button" title="Clear all keywords" aria-label="Clear all keywords">Clear all</button>
     </header>
     <div class="content">
       <div id="strings"></div>
@@ -189,6 +243,9 @@ function renderPanel(state: State, nonce: string): string {
     const vscode = acquireVsCodeApi();
     const list = document.getElementById('strings');
     const initialState = JSON.parse(document.getElementById('initial-state').textContent);
+    // Collapse state survives list updates and webview reloads via setState.
+    const collapsed = (vscode.getState() || {}).collapsed || {};
+    let lastState = initialState;
 
     function hashString(value) {
       let hash = 2166136261;
@@ -207,25 +264,54 @@ function renderPanel(state: State, nonce: string): string {
       };
     }
 
-    function renderStrings(registered, hidden) {
-      list.textContent = '';
+    function renderSection(title, scope, data, options) {
+      const isCollapsed = !!collapsed[scope];
+      const header = document.createElement('div');
+      header.className = 'sectionHeader';
 
-      if (!registered.length) {
+      const heading = document.createElement('button');
+      heading.type = 'button';
+      heading.className = 'sectionToggle';
+      heading.dataset.toggleSection = scope;
+      heading.textContent = (isCollapsed ? '\\u25b8 ' : '\\u25be ') + title + ' (' + data.registered.length + ')';
+      heading.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      heading.title = isCollapsed ? 'Expand section' : 'Collapse section';
+
+      const clearButton = document.createElement('button');
+      clearButton.type = 'button';
+      clearButton.dataset.action = 'clearAll';
+      clearButton.dataset.scope = scope;
+      clearButton.textContent = 'Clear';
+      clearButton.title = options.clearTitle;
+      clearButton.setAttribute('aria-label', options.clearTitle);
+
+      header.append(heading, clearButton);
+      list.appendChild(header);
+
+      if (isCollapsed) {
+        return;
+      }
+
+      if (!data.registered.length) {
         const empty = document.createElement('div');
         empty.className = 'empty';
-        empty.textContent = 'No Keyword';
+        empty.textContent = 'No keyword';
         list.appendChild(empty);
         return;
       }
 
-      const hiddenSet = new Set(hidden);
+      const hiddenSet = new Set(data.hidden);
 
-      for (const value of registered) {
+      for (const value of data.registered) {
         const color = colorForString(value);
         const item = document.createElement('div');
         item.className = 'item';
         if (hiddenSet.has(value)) {
           item.classList.add('hidden');
+        }
+        if (options.overriddenSet && options.overriddenSet.has(value)) {
+          item.classList.add('overridden');
+          item.title = 'Overridden by Global';
         }
 
         const row = document.createElement('div');
@@ -235,7 +321,7 @@ function renderPanel(state: State, nonce: string): string {
         code.className = 'label';
         code.textContent = value;
         code.style.background = color.backgroundColor;
-        code.style.border = '1px solid ' + color.borderColor;
+        code.style.border = '1px ' + (options.dashed ? 'dashed' : 'solid') + ' ' + color.borderColor;
         code.style.padding = '2px 4px';
         code.style.borderRadius = '4px';
 
@@ -245,6 +331,7 @@ function renderPanel(state: State, nonce: string): string {
         const toggleHiddenButton = document.createElement('button');
         toggleHiddenButton.type = 'button';
         toggleHiddenButton.dataset.action = 'toggleHidden';
+        toggleHiddenButton.dataset.scope = scope;
         toggleHiddenButton.dataset.value = value;
         toggleHiddenButton.textContent = hiddenSet.has(value) ? 'Show' : 'Hide';
         toggleHiddenButton.title = hiddenSet.has(value) ? 'Show keyword' : 'Hide keyword';
@@ -253,6 +340,7 @@ function renderPanel(state: State, nonce: string): string {
         const deleteButton = document.createElement('button');
         deleteButton.type = 'button';
         deleteButton.dataset.action = 'delete';
+        deleteButton.dataset.scope = scope;
         deleteButton.dataset.value = value;
         deleteButton.textContent = 'Delete';
         deleteButton.title = 'Delete keyword';
@@ -265,23 +353,43 @@ function renderPanel(state: State, nonce: string): string {
       }
     }
 
+    function renderStrings(state) {
+      lastState = state;
+      list.textContent = '';
+
+      renderSection('Global', 'global', state.global, {
+        dashed: true,
+        clearTitle: 'Clear all global keywords (affects every project)'
+      });
+
+      if (state.hasWorkspace) {
+        renderSection('This Project', 'project', state.project, {
+          dashed: false,
+          clearTitle: 'Clear all keywords for this project',
+          overriddenSet: new Set(state.global.registered)
+        });
+      }
+    }
+
     window.addEventListener('message', (event) => {
       const message = event.data;
-      if (!message || message.type !== 'update') {
+      if (!message || message.type !== 'update' || !message.state) {
         return;
       }
 
-      renderStrings(
-        Array.isArray(message.registered) ? message.registered : [],
-        Array.isArray(message.hidden) ? message.hidden : []
-      );
-    });
-
-    document.getElementById('clearAll').addEventListener('click', () => {
-      vscode.postMessage({ command: 'clearAll' });
+      renderStrings(message.state);
     });
 
     list.addEventListener('click', (event) => {
+      const toggle = event.target.closest('button[data-toggle-section]');
+      if (toggle) {
+        const scope = toggle.dataset.toggleSection;
+        collapsed[scope] = !collapsed[scope];
+        vscode.setState({ collapsed });
+        renderStrings(lastState);
+        return;
+      }
+
       const button = event.target.closest('button[data-action]');
       if (!button) {
         return;
@@ -289,11 +397,12 @@ function renderPanel(state: State, nonce: string): string {
 
       vscode.postMessage({
         command: button.dataset.action,
+        scope: button.dataset.scope,
         value: button.dataset.value
       });
     });
 
-    renderStrings(initialState.registered || [], initialState.hidden || []);
+    renderStrings(initialState);
   </script>
 </body>
 </html>`;
@@ -303,10 +412,19 @@ export function activate(context: vscode.ExtensionContext) {
   const vscodeApi = vscode;
   const output = vscodeApi.window.createOutputChannel('Highlight Manager');
   context.subscriptions.push(output);
-  const loadedState = normalizeState(context.globalState.get(STORAGE_KEY, [] as any));
-  let registered = loadedState.registered;
-  let hidden = loadedState.hidden;
-  const decorationTypes = new Map<string, vscode.TextEditorDecorationType>();
+  const SCOPES = ['global', 'project'] as const;
+  const stores: Record<Scope, { memento: vscode.Memento; key: string }> = {
+    global: { memento: context.globalState, key: GLOBAL_STORAGE_KEY },
+    project: { memento: context.workspaceState, key: WORKSPACE_STORAGE_KEY }
+  };
+  const loadScope = (scope: Scope) => normalizeState(stores[scope].memento.get(stores[scope].key, [] as any));
+  const kw: Record<Scope, State> = { global: loadScope('global'), project: loadScope('project') };
+  // Sync global keywords across machines via Settings Sync (no-op on old VS Code).
+  context.globalState.setKeysForSync?.([GLOBAL_STORAGE_KEY]);
+  const hasWorkspace = () => (vscodeApi.workspace.workspaceFolders || []).length > 0;
+  const panelState = (): PanelState => ({ global: kw.global, project: kw.project, hasWorkspace: hasWorkspace() });
+  const asScope = (value: unknown): Scope | undefined => (value === 'global' || value === 'project' ? value : undefined);
+  const decorationTypes = new Map<string, { scope: Scope; type: vscode.TextEditorDecorationType }>();
   let sidebarView: vscode.WebviewView | undefined;
 
   const renderSidebarHtml = (webviewView: vscode.WebviewView) => {
@@ -316,13 +434,13 @@ export function activate(context: vscode.ExtensionContext) {
     // default, since retainContextWhenHidden is off), and does NOT call
     // resolveWebviewView again. Without this, deleted keywords reappear after
     // collapsing/expanding the sidebar.
-    webviewView.webview.html = renderPanel({ registered, hidden }, getNonce());
+    webviewView.webview.html = renderPanel(panelState(), getNonce());
   };
 
   const viewProvider: vscode.WebviewViewProvider = {
     resolveWebviewView(webviewView: vscode.WebviewView) {
       sidebarView = webviewView;
-      output.appendLine('Webview resolved; sending initial state with ' + registered.length + ' registered items');
+      output.appendLine('Webview resolved; sending initial state with ' + (kw.global.registered.length + kw.project.registered.length) + ' registered items');
       webviewView.webview.options = { enableScripts: true };
       renderSidebarHtml(webviewView);
       webviewView.onDidChangeVisibility(() => {
@@ -338,18 +456,23 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
+        const scope = asScope(message.scope);
+        if (!scope) {
+          return;
+        }
+
         if (message.command === 'clearAll') {
-          clearAll();
+          clearAll(scope);
           return;
         }
 
         if (message.command === 'delete') {
-          deleteKeyword(message.value);
+          deleteKeyword(scope, message.value);
           return;
         }
 
         if (message.command === 'toggleHidden') {
-          toggleHidden(message.value);
+          toggleHidden(scope, message.value);
         }
       });
       webviewView.onDidDispose(() => {
@@ -360,154 +483,166 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
-  const refreshHighlights = () => {
-    const active = registered.filter((value) => !hidden.includes(value));
-
-    for (const editor of vscodeApi.window.visibleTextEditors) {
-      for (const decorationType of decorationTypes.values()) {
-        editor.setDecorations(decorationType, []);
-      }
-
-      for (const term of active) {
-        const decorationType = decorationTypes.get(term) || createDecorationType(vscodeApi, term);
-        decorationTypes.set(term, decorationType);
-        const ranges = findMatches(editor.document.getText(), term).map(([start, end]) => new vscodeApi.Range(editor.document.positionAt(start), editor.document.positionAt(end)));
-        editor.setDecorations(decorationType, ranges);
-      }
-    }
-
-    if (sidebarView) {
-      sidebarView.webview.postMessage({
-        type: 'update',
-        registered,
-        hidden
-      });
-    }
-  };
-
-  const syncDecorationTypes = (nextRegistered: string[]) => {
-    const next = new Set(nextRegistered);
-    for (const [term, decorationType] of decorationTypes) {
-      if (next.has(term)) {
+  // Effective rendering state per keyword. Global takes precedence: when a
+  // keyword is registered in both scopes, the global entry's settings govern.
+  const effectiveEntries = (): Map<string, { hidden: boolean; scope: Scope }> => {
+    const entries = new Map<string, { hidden: boolean; scope: Scope }>();
+    for (const scope of SCOPES) {
+      if (scope === 'project' && !hasWorkspace()) {
         continue;
       }
 
-      for (const editor of vscodeApi.window.visibleTextEditors) {
-        editor.setDecorations(decorationType, []);
+      const hidden = new Set(kw[scope].hidden);
+      for (const term of kw[scope].registered) {
+        entries.set(term, { hidden: hidden.has(term), scope });
       }
-      decorationType.dispose();
-      decorationTypes.delete(term);
+    }
+    return entries;
+  };
+
+  const refreshHighlights = () => {
+    const entries = effectiveEntries();
+
+    // Reconcile decoration types: drop terms that are gone or whose governing
+    // scope (border style) changed. dispose() also clears them from editors.
+    for (const [term, deco] of decorationTypes) {
+      const entry = entries.get(term);
+      if (!entry || entry.scope !== deco.scope) {
+        deco.type.dispose();
+        decorationTypes.delete(term);
+      }
+    }
+
+    for (const editor of vscodeApi.window.visibleTextEditors) {
+      for (const deco of decorationTypes.values()) {
+        editor.setDecorations(deco.type, []);
+      }
+
+      const text = editor.document.getText();
+      for (const [term, entry] of entries) {
+        if (entry.hidden) {
+          continue;
+        }
+
+        let deco = decorationTypes.get(term);
+        if (!deco) {
+          deco = { scope: entry.scope, type: createDecorationType(vscodeApi, term, entry.scope) };
+          decorationTypes.set(term, deco);
+        }
+        const ranges = findMatches(text, term).map(([start, end]) => new vscodeApi.Range(editor.document.positionAt(start), editor.document.positionAt(end)));
+        editor.setDecorations(deco.type, ranges);
+      }
     }
   };
 
-  const persist = async () => {
-    await context.globalState.update(STORAGE_KEY, { registered, hidden });
-    // Ensure the sidebar webview receives an explicit update after state persists
-    try {
-      refreshHighlights();
-      output.appendLine('Persisted state. registered=' + JSON.stringify(registered));
-      if (sidebarView && sidebarView.webview) {
-        // postMessage returns Thenable<boolean> in webview API
-        Promise.resolve(sidebarView.webview.postMessage({ type: 'update', registered, hidden })).catch(() => {});
-        output.appendLine('Posted update to sidebar webview');
-      } else {
-        output.appendLine('No sidebar view active to post update');
-      }
-    } catch (err) {
-      // swallow errors but keep functionality
+  // The sidebar only depends on keyword state, so it is posted from the
+  // mutation paths rather than refreshHighlights (which runs per keystroke).
+  const postPanelState = () => {
+    if (sidebarView) {
+      sidebarView.webview.postMessage({ type: 'update', state: panelState() });
     }
   };
 
-  const selectedStrings = (editor: vscode.TextEditor) => normalizeStrings(editor.selections.map((selection) => editor.document.getText(selection)));
+  // Read-merge-write: re-read the stored value and apply the operation to the
+  // fresh copy, so a concurrent write from another window (both scopes can be
+  // shared: global always, workspace when the same folder is open twice) is
+  // not clobbered by our stale in-memory snapshot.
+  const applyScope = async (scope: Scope, mutate: (state: State) => State) => {
+    kw[scope] = mutate(loadScope(scope));
+    await stores[scope].memento.update(stores[scope].key, kw[scope]);
+    output.appendLine('Persisted ' + scope + ' state. registered=' + JSON.stringify(kw[scope].registered));
+    refreshHighlights();
+    postPanelState();
+  };
 
-  const toggleSelection = async () => {
+  const toggleSelectionIn = async (scope: Scope) => {
     const editor = vscodeApi.window.activeTextEditor;
     if (!editor) {
       return;
     }
 
-    const selected = selectedStrings(editor);
+    const selected = normalizeStrings(editor.selections.map((selection) => editor.document.getText(selection)));
     if (!selected.length) {
       return;
     }
 
-    const selectedSet = new Set(selected);
-    const toAdd = selected.filter((value) => !registered.includes(value));
-    const next = normalizeStrings([
-      ...registered.filter((value) => !selectedSet.has(value)),
-      ...toAdd
-    ]);
-
-    syncDecorationTypes(next);
-    registered = next;
-    output.appendLine('toggleSelection: selected=' + JSON.stringify(selected) + ' toAdd=' + JSON.stringify(toAdd) + ' registered=' + JSON.stringify(registered));
-    for (const term of toAdd) {
-      if (!decorationTypes.has(term)) {
-        decorationTypes.set(term, createDecorationType(vscodeApi, term));
-      }
+    if (scope === 'project' && !hasWorkspace()) {
+      vscodeApi.window.showInformationMessage('Highlight Manager: open a folder to use project keywords, or use "Highlight: Toggle Global Highlight" instead.');
+      return;
     }
-    await persist();
+
+    output.appendLine('toggleSelection(' + scope + '): selected=' + JSON.stringify(selected));
+    await applyScope(scope, (state) => toggleTerms(state, selected));
   };
 
-  const contextToggleSelection = vscodeApi.commands.registerCommand('highlightManager.toggleSelection', toggleSelection);
+  const contextToggleSelection = vscodeApi.commands.registerCommand('highlightManager.toggleSelection', () => toggleSelectionIn('project'));
+  const contextToggleSelectionGlobal = vscodeApi.commands.registerCommand('highlightManager.toggleSelectionGlobal', () => toggleSelectionIn('global'));
 
-  const deleteKeyword = async (value: unknown) => {
-    if (typeof value !== 'string' || !value) {
+  const deleteKeyword = async (scope: Scope, value: unknown) => {
+    if (typeof value !== 'string' || !value || !kw[scope].registered.includes(value)) {
       return;
     }
 
-    if (!registered.includes(value)) {
-      return;
-    }
-
-    registered = registered.filter((item) => item !== value);
-    hidden = hidden.filter((item) => item !== value);
-    decorationTypes.get(value)?.dispose();
-    decorationTypes.delete(value);
-    await persist();
+    await applyScope(scope, (state) => toggleTerms(state, [value]));
   };
 
-  const toggleHidden = async (value: unknown) => {
-    if (typeof value !== 'string' || !value || !registered.includes(value)) {
+  const toggleHidden = async (scope: Scope, value: unknown) => {
+    if (typeof value !== 'string' || !value || !kw[scope].registered.includes(value)) {
       return;
     }
 
-    hidden = hidden.includes(value) ? hidden.filter((item) => item !== value) : [...hidden, value];
-    await persist();
+    await applyScope(scope, (state) => ({ ...state, hidden: toggleIn(state.hidden, value) }));
   };
 
-  const clearAll = async () => {
-    if (!registered.length) {
+  const clearAll = async (scope: Scope) => {
+    if (!kw[scope].registered.length) {
       return;
     }
 
-    const confirmed = await vscodeApi.window.showWarningMessage('Clear all keywords?', { modal: true }, 'Clear all');
+    const prompt = scope === 'global'
+      ? 'Clear all global keywords? This affects every project.'
+      : 'Clear all keywords for this project?';
+    const confirmed = await vscodeApi.window.showWarningMessage(prompt, { modal: true }, 'Clear all');
     if (confirmed !== 'Clear all') {
       return;
     }
 
-    for (const editor of vscodeApi.window.visibleTextEditors) {
-      for (const decorationType of decorationTypes.values()) {
-        editor.setDecorations(decorationType, []);
-      }
-    }
-    for (const decorationType of decorationTypes.values()) {
-      decorationType.dispose();
-    }
-    decorationTypes.clear();
-    registered = [];
-    hidden = [];
-    await persist();
+    await applyScope(scope, () => ({ registered: [], hidden: [] }));
   };
 
   context.subscriptions.push(
     vscodeApi.window.registerWebviewViewProvider('highlightManager.sidebar', viewProvider),
     contextToggleSelection,
+    contextToggleSelectionGlobal,
     vscodeApi.window.onDidChangeActiveTextEditor(refreshHighlights),
     vscodeApi.workspace.onDidChangeTextDocument((event) => {
       if (vscodeApi.window.visibleTextEditors.some((editor) => editor.document === event.document)) {
         refreshHighlights();
       }
+    }),
+    // Another window may have changed the shared global state while this one
+    // was in the background; re-read on focus so the views converge.
+    vscodeApi.window.onDidChangeWindowState((event) => {
+      if (!event.focused) {
+        return;
+      }
+
+      let changed = false;
+      for (const scope of SCOPES) {
+        const fresh = loadScope(scope);
+        if (JSON.stringify(fresh) !== JSON.stringify(kw[scope])) {
+          kw[scope] = fresh;
+          changed = true;
+        }
+      }
+
+      if (!changed) {
+        return;
+      }
+
+      output.appendLine('Reloaded keyword state on window focus');
+      refreshHighlights();
+      postPanelState();
     })
   );
 
