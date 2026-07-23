@@ -10,7 +10,9 @@ declare module 'vscode' {
 
   export interface WebviewView {
     readonly webview: Webview;
+    readonly visible: boolean;
     onDidDispose(listener: () => any): vscode.Disposable;
+    onDidChangeVisibility(listener: () => any): vscode.Disposable;
   }
 
   export interface WebviewViewProvider {

@@ -309,13 +309,29 @@ export function activate(context: vscode.ExtensionContext) {
   const decorationTypes = new Map<string, vscode.TextEditorDecorationType>();
   let sidebarView: vscode.WebviewView | undefined;
 
+  const renderSidebarHtml = (webviewView: vscode.WebviewView) => {
+    // Re-bake the HTML so the inlined initial-state always reflects the
+    // current registered/hidden lists. VS Code reloads the webview from its
+    // last `html` string whenever the view is hidden and shown again (the
+    // default, since retainContextWhenHidden is off), and does NOT call
+    // resolveWebviewView again. Without this, deleted keywords reappear after
+    // collapsing/expanding the sidebar.
+    webviewView.webview.html = renderPanel({ registered, hidden }, getNonce());
+  };
+
   const viewProvider: vscode.WebviewViewProvider = {
     resolveWebviewView(webviewView: vscode.WebviewView) {
       sidebarView = webviewView;
       output.appendLine('Webview resolved; sending initial state with ' + registered.length + ' registered items');
       webviewView.webview.options = { enableScripts: true };
-      const nonce = getNonce();
-      webviewView.webview.html = renderPanel({ registered, hidden }, nonce);
+      renderSidebarHtml(webviewView);
+      webviewView.onDidChangeVisibility(() => {
+        // On re-show VS Code reloads the stale baked HTML; refresh it with the
+        // latest state so the list stays in sync.
+        if (webviewView.visible) {
+          renderSidebarHtml(webviewView);
+        }
+      });
       webviewView.webview.onDidReceiveMessage((message: any) => {
         output.appendLine('Webview message received: ' + JSON.stringify(message));
         if (!message || !message.command) {
